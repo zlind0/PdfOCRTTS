@@ -6,11 +6,11 @@ import base64, requests, re, subprocess
 import threading
 
 workdir = "."
-modelname = "benhaotang/Nanonets-OCR-s:latest"
+modelname = "mlx-community/Nanonets-OCR-s-bf16"
 api_key = "key"
 
 prompt = "ocr图片并输出markdown，忽略页码，忽略脚注，忽略注释"
-ollama_url = "http://192.168.1.4:11434/v1/chat/completions"
+ollama_url = "http://localhost:1234/v1/chat/completions"
 
 # system_prompt = """Extract the text from the above document as if you were reading it naturally. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present, add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>. Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes. Delete all footnotes."""
 
@@ -123,6 +123,39 @@ def purify_pagetxt(text):
     # 重新组合文本
     return '\n'.join(result_lines)
 
+def has_repeated_phrase_at_end(text, min_repeat=5, max_phrase_length=30):
+    """
+    检查文本末尾是否有短语重复多次
+    :param text: 要检查的文本
+    :param min_repeat: 最小重复次数（默认5次）
+    :param max_phrase_length: 短语最大长度（默认30字）
+    :return: 如果存在重复短语返回True，否则返回False
+    """
+    n = len(text)
+    if n < min_repeat:  # 文本太短无法重复
+        return False
+    
+    # 遍历所有可能的短语长度（1到max_phrase_length）
+    for phrase_len in range(1, max_phrase_length + 1):
+        required_length = min_repeat * phrase_len
+        if n < required_length:
+            continue  # 文本长度不足
+        
+        # 提取末尾需要检查的片段
+        segment = text[-required_length:]
+        
+        # 检查片段是否满足周期性（重复特征）
+        is_periodic = True
+        for j in range(0, required_length - phrase_len):
+            if segment[j] != segment[j + phrase_len]:
+                is_periodic = False
+                break
+        
+        if is_periodic:
+            return True
+    
+    return False
+
 for each_path in os.listdir(workdir):
     if ".pdf" in each_path:
         doc = fitz.Document((os.path.join(workdir, each_path)))
@@ -134,7 +167,7 @@ for each_path in os.listdir(workdir):
             for img in doc.get_page_images(i):
                 xref = img[0]
                 response_mdpath = os.path.join(pdfdatapath, "p%04d-%s.md" % (i, xref))
-                if os.path.exists(response_mdpath):
+                if os.path.exists(response_mdpath) or os.path.exists(os.path.join(pdfdatapath, "p%04d-%s.mp3" % (i, xref))):
                     continue
                 image = doc.extract_image(xref)
                 pix = fitz.Pixmap(doc, xref)
@@ -142,6 +175,9 @@ for each_path in os.listdir(workdir):
                 pix.save(pixpath)
                 
                 response_txt = perform_http_ocr(pix)
+                if has_repeated_phrase_at_end(response_txt):
+                    # 防止LLM OCR识别中出现无限重复，如果有，再做一次，还是有的话就放弃
+                    response_txt = perform_http_ocr(pix)
                 
                 with open(response_mdpath+".orig", "w") as f:
                     f.write(response_txt)
